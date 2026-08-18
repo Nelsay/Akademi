@@ -1,0 +1,114 @@
+name: Akademi Live Scholarship Collector
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'Akademi*.zip'
+      - 'akademi*.zip'
+      - 'collect-akademi-live-feed.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: akademi-live-feed
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Extract latest Akademi ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.2*.zip' | sort | tail -n1)"
+          if [ -z "$ZIP" ]; then ZIP="$(find . -maxdepth 1 -type f \( -iname 'Akademi*.zip' -o -iname 'akademi*.zip' \) | sort | tail -n1)"; fi
+          test -n "$ZIP" || { echo "No Akademi ZIP found in repository root"; exit 1; }
+          rm -rf extracted && mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          PROJECT_DIR="$(find extracted -type f -path '*/collector/collector.py' -printf '%h\n' | sed 's#/collector$##' | head -n1)"
+          test -n "$PROJECT_DIR" || { echo "collector/collector.py not found in ZIP"; exit 1; }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install collector dependencies
+        shell: bash
+        run: pip install -r "$PROJECT_DIR/collector/requirements.txt"
+
+      - name: Read previous published feed
+        shell: bash
+        run: |
+          git fetch origin live-feed:refs/remotes/origin/live-feed || true
+          git show origin/live-feed:opportunities.json > "$GITHUB_WORKSPACE/previous-opportunities.json" 2>/dev/null || echo '[]' > "$GITHUB_WORKSPACE/previous-opportunities.json"
+
+      - name: Collect and normalize opportunities
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          python collector/collector.py --max-pages 40
+          COUNT="$(python - <<'PY'
+          import json
+          print(len(json.load(open('feed/opportunities.json'))))
+          PY
+          )"
+          echo "Collector produced $COUNT records"
+          if [ "$COUNT" -lt 1 ]; then
+            echo "Live crawl produced no usable records; refusing to replace the existing live feed."
+            exit 1
+          fi
+
+      - name: Publish live-feed branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf publish && mkdir publish
+          cp "$PROJECT_DIR/feed/opportunities.json" publish/opportunities.json
+          cp "$PROJECT_DIR/feed/meta.json" publish/meta.json
+          cp "$PROJECT_DIR/collector/sources.json" publish/sources.json
+          cd publish
+          git init -q
+          git checkout -q -b live-feed
+          git config user.name "Akademi Collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add .
+          git commit -q -m "Update Akademi live feed $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin live-feed
+
+      - name: Send optional true push notification with FCM
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          python collector/push_fcm.py --previous "$GITHUB_WORKSPACE/previous-opportunities.json" --current feed/opportunities.json || true
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "### Akademi live feed updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "Feed: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/live-feed/opportunities.json" >> "$GITHUB_STEP_SUMMARY"
+          python - <<PY >> "$GITHUB_STEP_SUMMARY"
+          import json
+          m=json.load(open('$PROJECT_DIR/feed/meta.json'))
+          print(f"Records: {m['records']}  ")
+          print(f"Sources configured: {m['sources']}  ")
+          print(f"Generated: {m['generatedAt']}")
+          PY
