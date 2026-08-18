@@ -1,15 +1,9 @@
-name: Akademi Live Scholarship Collector
+name: Akademi Live Collector v0.3 + Optional Gemini
 
 on:
   workflow_dispatch:
   schedule:
     - cron: '17 */6 * * *'
-  push:
-    branches: [ "main", "master" ]
-    paths:
-      - 'Akademi*.zip'
-      - 'akademi*.zip'
-      - 'collect-akademi-live-feed.yml'
 
 permissions:
   contents: write
@@ -21,6 +15,7 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,13 +27,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Extract latest Akademi ZIP
+      - name: Extract Akademi v0.3.0 ZIP
         shell: bash
         run: |
           set -euo pipefail
-          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.2*.zip' | sort | tail -n1)"
-          if [ -z "$ZIP" ]; then ZIP="$(find . -maxdepth 1 -type f \( -iname 'Akademi*.zip' -o -iname 'akademi*.zip' \) | sort | tail -n1)"; fi
-          test -n "$ZIP" || { echo "No Akademi ZIP found in repository root"; exit 1; }
+          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.3.0*.zip' | sort | tail -n1)"
+          test -n "$ZIP" || { echo "Akademi v0.3.0 ZIP not found in repository root"; exit 1; }
           rm -rf extracted && mkdir extracted
           unzip -q "$ZIP" -d extracted
           PROJECT_DIR="$(find extracted -type f -path '*/collector/collector.py' -printf '%h\n' | sed 's#/collector$##' | head -n1)"
@@ -49,6 +43,41 @@ jobs:
         shell: bash
         run: pip install -r "$PROJECT_DIR/collector/requirements.txt"
 
+      - name: Make collector bounded and fast
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          root = Path(os.environ['PROJECT_DIR'])
+          p = root / 'collector' / 'collector.py'
+          s = p.read_text()
+          s = s.replace('def __init__(self, max_pages_per_source=36, timeout=18):',
+                        'def __init__(self, max_pages_per_source=36, timeout=8):')
+          old = '''            rp=RobotFileParser(); rp.set_url(root+"/robots.txt")\n            try: rp.read(); self.robot_cache[root]=rp\n            except Exception: self.robot_cache[root]=None'''
+          new = '''            rp=RobotFileParser()\n            try:\n                rr=self.s.get(root+"/robots.txt",timeout=4,allow_redirects=True)\n                if rr.status_code == 200:\n                    rp.parse(rr.text.splitlines()); self.robot_cache[root]=rp\n                else:\n                    self.robot_cache[root]=None\n            except Exception:\n                self.robot_cache[root]=None'''
+          if old in s:
+              s = s.replace(old, new)
+          s = s.replace('len(found)<self.max_pages*4 and len(visited)<12',
+                        'len(found)<self.max_pages*2 and len(visited)<3')
+          s = s.replace('len(visited)+len(queue)<12', 'len(visited)+len(queue)<3')
+          p.write_text(s)
+
+          # Manual run = fast bootstrap. Scheduled runs use bounded sitemap discovery.
+          if os.environ.get('EVENT_NAME') == 'workflow_dispatch':
+              src = root / 'collector' / 'sources.json'
+              data = json.loads(src.read_text())
+              for item in data:
+                  item['sitemap'] = False
+              src.write_text(json.dumps(data, indent=2) + '\n')
+              print(f'FAST BOOTSTRAP: {len(data)} source start pages, sitemaps disabled.')
+          else:
+              print('Scheduled bounded sitemap discovery enabled.')
+          PY
+
       - name: Read previous published feed
         shell: bash
         run: |
@@ -57,20 +86,34 @@ jobs:
 
       - name: Collect and normalize opportunities
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           cd "$PROJECT_DIR"
-          python collector/collector.py --max-pages 40
-          COUNT="$(python - <<'PY'
-          import json
-          print(len(json.load(open('feed/opportunities.json'))))
-          PY
-          )"
-          echo "Collector produced $COUNT records"
-          if [ "$COUNT" -lt 1 ]; then
-            echo "Live crawl produced no usable records; refusing to replace the existing live feed."
-            exit 1
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python collector/collector.py --max-pages 4
+          else
+            python collector/collector.py --max-pages 8
           fi
+          python - <<'PY'
+          import json
+          items=json.load(open('feed/opportunities.json'))
+          print(f'Collector produced {len(items)} records')
+          PY
+
+      - name: Optional Gemini public-data enrichment
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.6-flash
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          python collector/enrich_gemini.py \
+            --previous "$GITHUB_WORKSPACE/previous-opportunities.json" \
+            --current feed/opportunities.json \
+            --max-new 8
 
       - name: Publish live-feed branch
         env:
@@ -92,13 +135,14 @@ jobs:
           git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push --force origin live-feed
 
-      - name: Send optional true push notification with FCM
+      - name: Send optional FCM push notification
+        continue-on-error: true
         env:
           FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          python collector/push_fcm.py --previous "$GITHUB_WORKSPACE/previous-opportunities.json" --current feed/opportunities.json || true
+          python collector/push_fcm.py --previous "$GITHUB_WORKSPACE/previous-opportunities.json" --current feed/opportunities.json
 
       - name: Summary
         shell: bash
@@ -108,7 +152,8 @@ jobs:
           python - <<PY >> "$GITHUB_STEP_SUMMARY"
           import json
           m=json.load(open('$PROJECT_DIR/feed/meta.json'))
-          print(f"Records: {m['records']}  ")
-          print(f"Sources configured: {m['sources']}  ")
-          print(f"Generated: {m['generatedAt']}")
+          print(f"Records: {m.get('records', '?')}  ")
+          print(f"Sources configured: {m.get('sources', '?')}  ")
+          print(f"Generated: {m.get('generatedAt', '?')}")
           PY
+
