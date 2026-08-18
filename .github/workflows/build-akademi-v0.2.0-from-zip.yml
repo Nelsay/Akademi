@@ -1,12 +1,12 @@
-name: Build Akademi v0.3.0 From ZIP
+name: Build Akademi v0.3.1 From ZIP
 
 on:
   workflow_dispatch:
   push:
     branches: [ "main", "master" ]
     paths:
-      - 'Akademi-v0.3.0*.zip'
-      - 'build-akademi-v0.3.0-from-zip.yml'
+      - 'Akademi-v0.3.1*.zip'
+      - 'build-akademi-v0.3.1-from-zip.yml'
 
 jobs:
   build:
@@ -36,13 +36,13 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Extract Akademi v0.3.0 source ZIP
+      - name: Extract Akademi v0.3.1 source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.3.0*.zip' | sort | tail -n1)"
+          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.3.1*.zip' | sort | tail -n1)"
           if [ -z "$ZIP" ]; then
-            echo "Akademi v0.3.0 source ZIP was not found in the repository root."
+            echo "Akademi v0.3.1 source ZIP was not found in the repository root."
             exit 1
           fi
           rm -rf extracted && mkdir extracted
@@ -56,10 +56,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'versionName = "0.3.0"' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'versionName = "0.3.1"' "$PROJECT_DIR/app/build.gradle.kts"
           test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_app_icon.png"
           test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_header_logo.png"
-          echo "Akademi v0.3.0 source and branding assets verified."
+          echo "Akademi v0.3.1 source and branding assets verified."
 
       - name: Build APK with automatic live-feed URL
         shell: bash
@@ -67,10 +67,10 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug -PAKADEMI_FEED_URL="$FEED_URL" --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.3.0-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.3.1-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Akademi-v0.3.0-debug-apk
-          path: Akademi-v0.3.0-debug.apk
+          name: Akademi-v0.3.1-debug-apk
+          path: Akademi-v0.3.1-debug.apk
