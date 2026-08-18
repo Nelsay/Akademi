@@ -1,4 +1,4 @@
-name: Build Akademi v0.2 From ZIP
+name: Build Akademi v0.2.1 From ZIP
 
 on:
   workflow_dispatch:
@@ -56,10 +56,10 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug -PAKADEMI_FEED_URL="$FEED_URL" --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.2.0-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.2.1-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Akademi-v0.2.0-debug-apk
-          path: Akademi-v0.2.0-debug.apk
+          name: Akademi-v0.2.1-debug-apk
+          path: Akademi-v0.2.1-debug.apk
