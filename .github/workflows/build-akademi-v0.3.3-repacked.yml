@@ -1,0 +1,79 @@
+name: Build Akademi v0.3.3 Repacked
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'Akademi-v0.3.3-repacked-source.zip'
+      - 'build-akademi-v0.3.3-repacked.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify and extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="./Akademi-v0.3.3-repacked-source.zip"
+          test -f "$ZIP" || { echo "Required source ZIP not found: $ZIP"; exit 1; }
+          echo "Source archive:"
+          ls -lh "$ZIP"
+          echo "SHA256:"
+          sha256sum "$ZIP"
+          unzip -t "$ZIP"
+          rm -rf extracted && mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
+          test -n "$PROJECT_DIR" || { echo "settings.gradle.kts not found after extraction."; exit 1; }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "FEED_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/live-feed/opportunities.json" >> "$GITHUB_ENV"
+
+      - name: Verify source version and assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'versionName = "0.3.3"' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'ui-text-google-fonts' "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_app_icon.png"
+          test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_header_logo.png"
+          echo "Akademi v0.3.3 source verified."
+
+      - name: Build APK with automatic live-feed URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug -PAKADEMI_FEED_URL="$FEED_URL" --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.3.3-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Akademi-v0.3.3-debug-apk
+          path: Akademi-v0.3.3-debug.apk
