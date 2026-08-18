@@ -1,0 +1,85 @@
+name: Build Akademi v0.4.1 Notifications
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'Akademi-v0.4.1-notifications-source.zip'
+      - 'build-akademi-v0.4.1-notifications.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 SDK
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify and extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="./Akademi-v0.4.1-notifications-source.zip"
+          test -f "$ZIP" || { echo "Required source ZIP not found: $ZIP"; exit 1; }
+          echo "Source archive:"
+          ls -lh "$ZIP"
+          echo "SHA256:"
+          sha256sum "$ZIP"
+          unzip -t "$ZIP"
+          rm -rf extracted && mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
+          test -n "$PROJECT_DIR" || { echo "settings.gradle.kts not found after extraction."; exit 1; }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "FEED_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/live-feed/opportunities.json" >> "$GITHUB_ENV"
+
+      - name: Verify v0.4.1 visual + notification rebuild
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'versionName = "0.4.1"' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'R.array.com_google_android_gms_fonts_certs' "$PROJECT_DIR/app/src/main/java/com/akademi/app/ui/theme/AkademiTheme.kt"
+          grep -q 'object VisualLibrary' "$PROJECT_DIR/app/src/main/java/com/akademi/app/data/VisualLibrary.kt"
+          grep -q 'NotificationCenterScreen' "$PROJECT_DIR/app/src/main/java/com/akademi/app/AkademiApp.kt"
+          grep -q 'object InAppNotificationStore' "$PROJECT_DIR/app/src/main/java/com/akademi/app/notifications/InAppNotificationStore.kt"
+          test -f "$PROJECT_DIR/app/src/main/res/values/font_certs.xml"
+          test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_app_icon.png"
+          test -f "$PROJECT_DIR/app/src/main/res/drawable-nodpi/akademi_header_logo.png"
+          COUNT="$(find "$PROJECT_DIR/app/src/main/res/drawable-nodpi" -maxdepth 1 -name 'akademi_visual_*.webp' | wc -l | tr -d ' ')"
+          test "$COUNT" -ge 26 || { echo "Expected 26 bundled visual assets, found $COUNT"; exit 1; }
+          echo "Akademi v0.4.1 visual + notification source verified with $COUNT editorial assets."
+
+      - name: Build APK with automatic live-feed URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle :app:assembleDebug -PAKADEMI_FEED_URL="$FEED_URL" --stacktrace
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.4.1-debug.apk"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Akademi-v0.4.1-debug-apk
+          path: Akademi-v0.4.1-debug.apk
