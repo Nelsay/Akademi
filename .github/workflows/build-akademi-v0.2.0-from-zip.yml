@@ -1,4 +1,4 @@
-name: Build Akademi v0.2.2 From ZIP
+name: Build Akademi v0.2.3 From ZIP
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ on:
     paths:
       - 'Akademi*.zip'
       - 'akademi*.zip'
-      - 'build-akademi-v0.2.2-from-zip.yml'
+      - 'build-akademi-v0.2.3-from-zip.yml'
 
 jobs:
   build:
@@ -36,13 +36,15 @@ jobs:
         with:
           gradle-version: '8.13'
 
-      - name: Extract latest Akademi source ZIP
+      - name: Extract Akademi v0.2.3 source ZIP
         shell: bash
         run: |
           set -euo pipefail
-          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.2*.zip' | sort | tail -n1)"
-          if [ -z "$ZIP" ]; then ZIP="$(find . -maxdepth 1 -type f \( -iname 'Akademi*.zip' -o -iname 'akademi*.zip' \) | sort | tail -n1)"; fi
-          test -n "$ZIP" || { echo "No Akademi*.zip found in repository root."; exit 1; }
+          ZIP="$(find . -maxdepth 1 -type f -iname 'Akademi-v0.2.3*.zip' | sort | tail -n1)"
+          if [ -z "$ZIP" ]; then
+            echo "Akademi v0.2.3 source ZIP was not found in the repository root."
+            exit 1
+          fi
           rm -rf extracted && mkdir extracted
           unzip -q "$ZIP" -d extracted
           PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
@@ -56,10 +58,10 @@ jobs:
           set -euo pipefail
           cd "$PROJECT_DIR"
           gradle :app:assembleDebug -PAKADEMI_FEED_URL="$FEED_URL" --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.2.2-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/Akademi-v0.2.3-debug.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Akademi-v0.2.2-debug-apk
-          path: Akademi-v0.2.2-debug.apk
+          name: Akademi-v0.2.3-debug-apk
+          path: Akademi-v0.2.3-debug.apk
