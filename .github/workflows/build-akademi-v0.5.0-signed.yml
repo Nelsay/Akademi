@@ -1,0 +1,159 @@
+name: Build Akademi v0.5.0 Signed Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'Akademi-v0.5.0-premium-final-source.zip'
+      - 'build-akademi-v0.5.0-signed.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AKADEMI_STORE_PASSWORD: AkademiPersonal2026!
+      AKADEMI_KEY_ALIAS: akademi
+      AKADEMI_KEY_PASSWORD: AkademiPersonal2026!
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android 36 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-36" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+
+      - name: Verify and extract source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="./Akademi-v0.5.0-premium-final-source.zip"
+          test -f "$ZIP" || { echo "Required source ZIP not found: $ZIP"; exit 1; }
+          ls -lh "$ZIP"
+          sha256sum "$ZIP"
+          unzip -t "$ZIP"
+          rm -rf extracted && mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          PROJECT_DIR="$(find extracted -type f -name settings.gradle.kts -printf '%h\n' | head -n1)"
+          test -n "$PROJECT_DIR" || { echo "settings.gradle.kts not found after extraction."; exit 1; }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "FEED_URL=https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/live-feed/opportunities.json" >> "$GITHUB_ENV"
+          echo "UPDATE_API_URL=https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" >> "$GITHUB_ENV"
+
+      - name: Verify Akademi v0.5.0 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'versionName = "0.5.0"' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'versionCode = 15' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'DEFAULT_UPDATE_API_URL' "$PROJECT_DIR/app/build.gradle.kts"
+          grep -q 'Full opportunity brief' "$PROJECT_DIR/app/src/main/java/com/akademi/app/AkademiApp.kt"
+          grep -q 'Live forum research' "$PROJECT_DIR/app/src/main/java/com/akademi/app/AkademiApp.kt"
+          grep -q 'object UpdateManager' "$PROJECT_DIR/app/src/main/java/com/akademi/app/update/UpdateManager.kt"
+          grep -q 'REQUEST_INSTALL_PACKAGES' "$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$PROJECT_DIR/app/src/main/res/xml/file_paths.xml"
+          VISUAL_COUNT="$(find "$PROJECT_DIR/app/src/main/res/drawable-nodpi" -maxdepth 1 -name 'akademi_visual_*.webp' | wc -l | tr -d ' ')"
+          AVATAR_COUNT="$(find "$PROJECT_DIR/app/src/main/res/drawable-nodpi" -maxdepth 1 -name 'akademi_avatar_*.webp' | wc -l | tr -d ' ')"
+          test "$VISUAL_COUNT" -ge 26 || { echo "Expected at least 26 editorial visuals, found $VISUAL_COUNT"; exit 1; }
+          test "$AVATAR_COUNT" -ge 14 || { echo "Expected at least 14 professor avatars, found $AVATAR_COUNT"; exit 1; }
+          echo "Verified $VISUAL_COUNT editorial visuals and $AVATAR_COUNT avatar crops."
+
+      - name: Restore persistent Akademi signing key
+        shell: bash
+        env:
+          AKADEMI_SIGNING_KEY_B64: ${{ secrets.AKADEMI_SIGNING_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          test -n "$AKADEMI_SIGNING_KEY_B64" || {
+            echo "Missing GitHub Actions secret: AKADEMI_SIGNING_KEY_B64"
+            echo "Paste the contents of Akademi-Personal-Signing-v1.base64.txt into that secret."
+            exit 1
+          }
+          KEYSTORE="$RUNNER_TEMP/akademi-personal-release.jks"
+          printf '%s' "$AKADEMI_SIGNING_KEY_B64" | tr -d '\r\n ' | base64 --decode > "$KEYSTORE"
+          test -s "$KEYSTORE" || { echo "Decoded signing key is empty."; exit 1; }
+          keytool -list -keystore "$KEYSTORE" -storepass "$AKADEMI_STORE_PASSWORD" -alias "$AKADEMI_KEY_ALIAS" >/dev/null
+          echo "AKADEMI_KEYSTORE_PATH=$KEYSTORE" >> "$GITHUB_ENV"
+          echo "Persistent signing key restored successfully."
+
+      - name: Build signed release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle :app:assembleRelease \
+            -PAKADEMI_FEED_URL="$FEED_URL" \
+            -PAKADEMI_UPDATE_API_URL="$UPDATE_API_URL" \
+            --stacktrace
+          test -f app/build/outputs/apk/release/app-release.apk
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Akademi-v0.5.0.apk"
+
+      - name: Verify APK signature and integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs Akademi-v0.5.0.apk
+          sha256sum Akademi-v0.5.0.apk | tee Akademi-v0.5.0.apk.sha256
+          HASH="$(sha256sum Akademi-v0.5.0.apk | awk '{print $1}')"
+          cat > release-notes.txt <<EOF
+          Akademi v0.5.0
+
+          Premium travel-style UX refresh, full in-app scholarship briefs, functional Home search and refresh, professor avatar profiles, Video/Forum story research, centered profile editing, improved spacing, and a persistent signed update channel.
+
+          SHA-256: $HASH
+          EOF
+
+      - name: Upload signed APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Akademi-v0.5.0-signed-apk
+          path: |
+            Akademi-v0.5.0.apk
+            Akademi-v0.5.0.apk.sha256
+
+      - name: Publish GitHub Release for in-app updates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v0.5.0"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" Akademi-v0.5.0.apk Akademi-v0.5.0.apk.sha256 --clobber
+            gh release edit "$TAG" --title "Akademi v0.5.0" --notes-file release-notes.txt
+          else
+            gh release create "$TAG" Akademi-v0.5.0.apk Akademi-v0.5.0.apk.sha256 \
+              --title "Akademi v0.5.0" \
+              --notes-file release-notes.txt
+          fi
+
+      - name: Build summary
+        shell: bash
+        run: |
+          echo "### Akademi v0.5.0 signed release built" >> "$GITHUB_STEP_SUMMARY"
+          echo "- APK: Akademi-v0.5.0.apk" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Persistent signer: enabled" >> "$GITHUB_STEP_SUMMARY"
+          echo "- GitHub Release: v0.5.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "- In-app update endpoint embedded: $UPDATE_API_URL" >> "$GITHUB_STEP_SUMMARY"

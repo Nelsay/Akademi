@@ -1,0 +1,145 @@
+name: Akademi Live Collector v0.5.0 + Optional Gemini
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: akademi-live-feed
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Extract Akademi v0.5.0 ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="./Akademi-v0.5.0-premium-final-source.zip"
+          test -f "$ZIP" || { echo "Akademi v0.5.0 source ZIP not found in repository root"; exit 1; }
+          unzip -t "$ZIP"
+          rm -rf extracted && mkdir extracted
+          unzip -q "$ZIP" -d extracted
+          PROJECT_DIR="$(find extracted -type f -path '*/collector/collector.py' -printf '%h\n' | sed 's#/collector$##' | head -n1)"
+          test -n "$PROJECT_DIR" || { echo "collector/collector.py not found in ZIP"; exit 1; }
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install collector dependencies
+        shell: bash
+        run: pip install -r "$PROJECT_DIR/collector/requirements.txt"
+
+      - name: Keep collection bounded and fast
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['PROJECT_DIR'])
+          if os.environ.get('EVENT_NAME') == 'workflow_dispatch':
+              src = root / 'collector' / 'sources.json'
+              data = json.loads(src.read_text())
+              for item in data:
+                  item['sitemap'] = False
+              src.write_text(json.dumps(data, indent=2) + '\n')
+              print(f'FAST BOOTSTRAP: {len(data)} source start pages; sitemap crawling disabled.')
+          else:
+              print('Scheduled bounded sitemap discovery enabled.')
+          PY
+
+      - name: Read previous published feed
+        shell: bash
+        run: |
+          git fetch origin live-feed:refs/remotes/origin/live-feed || true
+          git show origin/live-feed:opportunities.json > "$GITHUB_WORKSPACE/previous-opportunities.json" 2>/dev/null || echo '[]' > "$GITHUB_WORKSPACE/previous-opportunities.json"
+
+      - name: Collect and normalize scholarships
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            python collector/collector.py --max-pages 4
+          else
+            python collector/collector.py --max-pages 8
+          fi
+          python - <<'PY'
+          import json
+          items=json.load(open('feed/opportunities.json'))
+          print(f'Collector produced {len(items)} normalized records')
+          PY
+
+      - name: Optional Gemini source enrichment
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.6-flash
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          python collector/enrich_gemini.py \
+            --previous "$GITHUB_WORKSPACE/previous-opportunities.json" \
+            --current feed/opportunities.json \
+            --max-new 10
+
+      - name: Publish live-feed branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf publish && mkdir publish
+          cp "$PROJECT_DIR/feed/opportunities.json" publish/opportunities.json
+          cp "$PROJECT_DIR/feed/meta.json" publish/meta.json
+          cp "$PROJECT_DIR/collector/sources.json" publish/sources.json
+          cd publish
+          git init -q
+          git checkout -q -b live-feed
+          git config user.name "Akademi Collector"
+          git config user.email "actions@users.noreply.github.com"
+          git add .
+          git commit -q -m "Update Akademi live feed $(date -u +'%Y-%m-%d %H:%M UTC')"
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin live-feed
+
+      - name: Optional FCM push notification
+        continue-on-error: true
+        env:
+          FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          python collector/push_fcm.py --previous "$GITHUB_WORKSPACE/previous-opportunities.json" --current feed/opportunities.json
+
+      - name: Summary
+        shell: bash
+        run: |
+          echo "### Akademi v0.5 live feed updated" >> "$GITHUB_STEP_SUMMARY"
+          echo "Feed: https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/live-feed/opportunities.json" >> "$GITHUB_STEP_SUMMARY"
+          python - <<PY >> "$GITHUB_STEP_SUMMARY"
+          import json
+          m=json.load(open('$PROJECT_DIR/feed/meta.json'))
+          print(f"Records: {m.get('records', '?')}  ")
+          print(f"Sources configured: {m.get('sources', '?')}  ")
+          print(f"Generated: {m.get('generatedAt', '?')}")
+          PY
