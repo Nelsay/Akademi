@@ -1,0 +1,113 @@
+{
+  "generatedAt": "2026-09-06T20:28:51.064105+00:00",
+  "records": 68,
+  "sources": 26,
+  "stats": {
+    "Erasmus+ Erasmus Mundus": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "DAAD": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "EURAXESS": {
+      "checked": 8,
+      "accepted": 1
+    },
+    "Commonwealth Scholarship Commission": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "Australia Awards": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "Manaaki New Zealand Scholarships": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "Australian Research Training Program": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "Mastercard Foundation Scholars Program": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "Chevening": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "Gates Cambridge": {
+      "checked": 2,
+      "accepted": 2
+    },
+    "Oxford Graduate Scholarships": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "Cambridge Postgraduate Funding": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "Swedish Institute": {
+      "checked": 8,
+      "accepted": 7
+    },
+    "Swiss Government Excellence Scholarships": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "Government of Ireland Research Funding": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "University of Melbourne Graduate Research": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "Monash Graduate Scholarships": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "University of Auckland Scholarships": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "University of Alberta Graduate Awards": {
+      "checked": 1,
+      "accepted": 0
+    },
+    "UBC Graduate Awards": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "University of Toronto Graduate Funding": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "ANU Scholarships": {
+      "checked": 8,
+      "accepted": 4
+    },
+    "Victoria University of Wellington Scholarships": {
+      "checked": 8,
+      "accepted": 1
+    },
+    "McGill Graduate Funding": {
+      "checked": 1,
+      "accepted": 1
+    },
+    "Campus France": {
+      "checked": 8,
+      "accepted": 8
+    },
+    "Fulbright Nigeria": {
+      "checked": 1,
+      "accepted": 0
+    }
+  },
+  "collector": "Akademi deterministic collector v0.5",
+  "note": "Always verify final eligibility, funding and deadlines on the original source."
+}
