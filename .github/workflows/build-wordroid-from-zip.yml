@@ -1,0 +1,228 @@
+name: Build Signed Wordroid from ZIP
+
+'on':
+  workflow_dispatch:
+    inputs:
+      version_code:
+        description: 'Android versionCode (increase for every installed update)'
+        required: false
+        default: '1'
+        type: string
+      version_name:
+        description: 'Human-readable version name'
+        required: false
+        default: '0.1.0'
+        type: string
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'Wordroid-source*.zip'
+      - '.github/workflows/build-wordroid-from-zip.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wordroid-signed-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Locate and validate Wordroid source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname 'Wordroid-source*.zip' -not -iname '*logs*' -print | sort -V | tail -n 1)"
+          test -n "${ZIP_FILE:-}" || {
+            echo 'ERROR: Upload Wordroid-source-v*.zip to the repository root.' >&2
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -printf '%P\n' | sort >&2 || true
+            exit 1
+          }
+          unzip -t "$ZIP_FILE" >/dev/null
+          echo "SOURCE_ZIP=$ZIP_FILE" >> "$GITHUB_ENV"
+          sha256sum "$ZIP_FILE"
+
+      # Extract before Java/Gradle setup. This avoids the cache/project-discovery failures
+      # encountered by earlier ZIP-based Android workflows.
+      - name: Extract and locate Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="$RUNNER_TEMP/wordroid-src"
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+          unzip -q "$SOURCE_ZIP" -d "$EXTRACT_DIR"
+
+          SETTINGS_FILE="$(find "$EXTRACT_DIR" -maxdepth 6 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print -quit)"
+          test -n "${SETTINGS_FILE:-}" || {
+            echo 'ERROR: No settings.gradle/settings.gradle.kts found in source ZIP.' >&2
+            find "$EXTRACT_DIR" -maxdepth 5 -type f | sort | head -n 200 >&2
+            exit 1
+          }
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          test -f "$PROJECT_DIR/app/build.gradle"
+          test -f "$PROJECT_DIR/signing/wordroid-release.jks"
+          test -f "$PROJECT_DIR/signing/keystore.properties"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Detected Wordroid project: $PROJECT_DIR"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Use GitHub's preinstalled Android cmdline-tools directly. Do not use
+      # android-actions/setup-android; earlier ZIP builds failed when that action
+      # requested retired SDK packages before Gradle even started.
+      - name: Configure Android SDK API 36
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -path '*/bin/sdkmanager' 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          test -x "$SDKMANAGER" || { echo 'ERROR: sdkmanager not found.' >&2; exit 1; }
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          ATTEMPT=1
+          until "$SDKMANAGER" 'platform-tools' 'platforms;android-36' 'build-tools;35.0.0'; do
+            [ "$ATTEMPT" -lt 3 ] || { echo 'ERROR: Android SDK package install failed after 3 attempts.' >&2; exit 1; }
+            sleep $((ATTEMPT * 20))
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+          test -x "$SDK_ROOT/build-tools/35.0.0/apksigner"
+
+      - name: Install Gradle 8.13
+        shell: bash
+        run: |
+          set -euo pipefail
+          GRADLE_VERSION='8.13'
+          ARCHIVE="$RUNNER_TEMP/gradle-$GRADLE_VERSION-bin.zip"
+          curl -fL --retry 4 --retry-delay 3 \
+            "https://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip" \
+            -o "$ARCHIVE"
+          echo '20f1b1176237254a6fc204d8434196fa11a4cfb387567519c61556e8710aed78  '"$ARCHIVE" | sha256sum -c -
+          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/gradle-$GRADLE_VERSION/bin" >> "$GITHUB_PATH"
+
+      - name: Preflight project and signing identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "com.android.application' version '8.13.2'" "$PROJECT_DIR/build.gradle"
+          grep -q 'compileSdk 36' "$PROJECT_DIR/app/build.gradle"
+          grep -q "applicationId 'com.nelsay.wordroid'" "$PROJECT_DIR/app/build.gradle"
+          grep -q 'targetSdk 36' "$PROJECT_DIR/app/build.gradle"
+          grep -q 'WindowInsets.Type.systemBars' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'showFindReplace' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'RulerView' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'Table of Contents' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'Google Fonts' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'undoStack' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'offerRecoveredDocuments' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          grep -q 'printDocument' "$PROJECT_DIR/app/src/main/java/com/nelsay/wordroid/MainActivity.java"
+          test -f "$PROJECT_DIR/app/src/main/res/drawable/wordroid_mark.png"
+
+          PROPS="$PROJECT_DIR/signing/keystore.properties"
+          STORE_PASS="$(grep '^storePassword=' "$PROPS" | cut -d= -f2-)"
+          ALIAS="$(grep '^keyAlias=' "$PROPS" | cut -d= -f2-)"
+          CERT="$(keytool -list -v -keystore "$PROJECT_DIR/signing/wordroid-release.jks" -storepass "$STORE_PASS" -alias "$ALIAS" | sed -n 's/.*SHA256: //p' | tr -d '\r')"
+          EXPECTED='5A:82:51:E2:A5:67:52:24:BE:4F:D6:CB:D5:FB:CE:FD:DF:05:DA:DD:95:EC:6A:B4:C5:C5:91:6F:E4:09:29:A5'
+          test "$CERT" = "$EXPECTED" || {
+            echo 'ERROR: Wordroid signing certificate changed. In-place updates would break.' >&2
+            echo "Expected: $EXPECTED" >&2
+            echo "Actual:   $CERT" >&2
+            exit 1
+          }
+          echo "Permanent Wordroid signing certificate: $CERT"
+          java -version
+
+      - name: Resolve app version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VC='${{ inputs.version_code }}'
+          VN='${{ inputs.version_name }}'
+          [ -n "$VC" ] || VC="$(grep '^WORDROID_VERSION_CODE=' "$PROJECT_DIR/gradle.properties" | cut -d= -f2-)"
+          [ -n "$VN" ] || VN="$(grep '^WORDROID_VERSION_NAME=' "$PROJECT_DIR/gradle.properties" | cut -d= -f2-)"
+          [[ "$VC" =~ ^[1-9][0-9]*$ ]] || { echo 'versionCode must be a positive integer.'; exit 1; }
+          echo "WORDROID_VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          echo "WORDROID_VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          echo "Building Wordroid v$VN (versionCode $VC)"
+
+      - name: Build signed release APK with network-safe retry
+        shell: bash
+        env:
+          GRADLE_OPTS: >-
+            -Dorg.gradle.internal.http.connectionTimeout=120000
+            -Dorg.gradle.internal.http.socketTimeout=120000
+            -Dorg.gradle.parallel=false
+        run: |
+          set -euo pipefail
+          ATTEMPT=1
+          MAX_ATTEMPTS=4
+          while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+            echo "Gradle release attempt $ATTEMPT of $MAX_ATTEMPTS"
+            set +e
+            gradle --no-daemon --no-configuration-cache --stacktrace --max-workers=2 \
+              -p "$PROJECT_DIR" :app:assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/wordroid-gradle.log"
+            EXIT_CODE=${PIPESTATUS[0]}
+            set -e
+            if [ "$EXIT_CODE" -eq 0 ]; then break; fi
+            if grep -Eqi '429|Too Many Requests|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|Connection reset|Read timed out|Remote host terminated|Could not GET|Could not HEAD' "$GITHUB_WORKSPACE/wordroid-gradle.log"; then
+              [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ] || exit "$EXIT_CODE"
+              sleep $((ATTEMPT * 30))
+              ATTEMPT=$((ATTEMPT + 1))
+              continue
+            fi
+            exit "$EXIT_CODE"
+          done
+
+      - name: Verify, name, and checksum signed APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
+          test -f "$APK" || { echo 'ERROR: signed APK was not produced.' >&2; exit 1; }
+          APKSIGNER="$ANDROID_HOME/build-tools/35.0.0/apksigner"
+          "$APKSIGNER" verify --verbose --print-certs "$APK" | tee "$RUNNER_TEMP/wordroid-apk-cert.txt"
+          BUILT_CERT="$(sed -n 's/Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/wordroid-apk-cert.txt" | head -n 1 | tr '[:lower:]' '[:upper:]' | sed 's/../&:/g;s/:$//')"
+          EXPECTED_CERT='5A:82:51:E2:A5:67:52:24:BE:4F:D6:CB:D5:FB:CE:FD:DF:05:DA:DD:95:EC:6A:B4:C5:C5:91:6F:E4:09:29:A5'
+          test "$BUILT_CERT" = "$EXPECTED_CERT" || { echo "ERROR: Built APK certificate mismatch: $BUILT_CERT" >&2; exit 1; }
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          OUT="$GITHUB_WORKSPACE/apk-output/Wordroid-v${WORDROID_VERSION_NAME}-signed.apk"
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" > "$OUT.sha256"
+          ls -lh "$OUT" "$OUT.sha256"
+
+      - name: Upload signed Wordroid APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wordroid-v${{ env.WORDROID_VERSION_NAME }}-signed
+          path: |
+            apk-output/Wordroid-v${{ env.WORDROID_VERSION_NAME }}-signed.apk
+            apk-output/Wordroid-v${{ env.WORDROID_VERSION_NAME }}-signed.apk.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wordroid-build-diagnostics
+          path: |
+            wordroid-gradle.log
+            ${{ env.PROJECT_DIR }}/app/build/reports/**
+          if-no-files-found: ignore
+          retention-days: 14
